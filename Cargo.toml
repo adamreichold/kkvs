@@ -1,0 +1,11 @@
+[package]
+name = "kkvs"
+version = "0.1.0"
+authors = ["Adam Reichold <adam.reichold@t-online.de>"]
+
+[dependencies]
+futures = "0.1.17"
+kafka = "0.7.0"
+serde = "1.0.24"
+serde_derive = "1.0.24"
+serde_json = "1.0.8"
