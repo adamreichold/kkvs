@@ -27,7 +27,7 @@ use kafka::producer::{ Producer, Record };
 use serde::ser::Serialize;
 use serde::de::DeserializeOwned;
 
-use bincode::{serialize, deserialize, Infinite};
+use bincode::{ serialize, deserialize, Infinite };
 
 #[ derive( Debug, PartialEq ) ]
 pub enum Error {
@@ -154,7 +154,7 @@ fn get< K, V >( values: &Values< K, V >, key: K, sender: oneshot::Sender< Option
 
     let value = values.get( &key ).map( | &( ref value, _ ) | value.clone() );
 
-    sender.send( value ).unwrap();
+    let _ = sender.send( value );
 }
 
 fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pending_writes: &mut PendingWrites< K, V >, key: K, value: Option< V >, sender: oneshot::Sender< Result< (), Error > > ) where K: Eq + Hash + Serialize, V: Serialize {
@@ -162,7 +162,7 @@ fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pe
     let offset = values.get( &key ).map( | &( _, offset ) | offset );
 
     if value.is_none() && offset.is_none() {
-        sender.send( Err( Error::KeyNotFound ) ).unwrap();
+        let _ = sender.send( Err( Error::KeyNotFound ) );
     } else {
 
         let update: Update< V > = Update{
@@ -174,7 +174,7 @@ fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pe
 
             Ok( () ) => { pending_writes.insert( ( key, update.old_offset ), ( update.new_value, sender ) ); }
 
-            Err( err ) => { sender.send( Err( err ) ).unwrap(); }
+            Err( err ) => { let _ = sender.send( Err( err ) ); }
 
         };
     }
@@ -182,22 +182,15 @@ fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pe
 
 fn receive< K, V >( values: &mut Values< K, V >, pending_writes: &mut PendingWrites< K, V >, key: K, new_value: Option< V >, old_offset: i64, new_offset: i64 ) where K: Debug + Eq + Hash, V: Debug + PartialEq {
 
-    println!(
-        "before receive: key={:?} new_value={:?} old_offset={} new_offset={} values={:?}",
-        key, new_value, old_offset, new_offset, values
-    );
-
     let ( key, pending_write ) = remove_pending_write( pending_writes, key, &new_value, old_offset );
 
     if update_value( values, key, new_value, old_offset, new_offset ) {
 
         if let Some( ( sender, result ) ) = pending_write {
-            sender.send( result ).unwrap();
+            let _ = sender.send( result );
         }
 
     }
-
-    println!( "after receive: values={:?}", values );
 }
 
 fn start_polling< K: 'static, V: 'static >( mut cons: Consumer, sender: &mpsc::Sender< Command< K, V > >, keep_polling: &Arc< AtomicBool > ) -> thread::JoinHandle< () > where K: Send + DeserializeOwned, V: Send + DeserializeOwned {
