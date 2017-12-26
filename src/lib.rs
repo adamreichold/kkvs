@@ -5,7 +5,7 @@ extern crate kafka;
 extern crate serde;
 #[ macro_use ]
 extern crate serde_derive;
-extern crate serde_json;
+extern crate bincode;
 
 use std::fmt::Debug;
 use std::hash::Hash;
@@ -26,6 +26,8 @@ use kafka::producer::{ Producer, Record };
 
 use serde::ser::Serialize;
 use serde::de::DeserializeOwned;
+
+use bincode::{serialize, deserialize, Infinite};
 
 #[ derive( Debug, PartialEq ) ]
 pub enum Error {
@@ -61,16 +63,16 @@ type PendingWrites< K, V > = HashMap< ( K, i64 ), ( Option< V >, oneshot::Sender
 
 fn send_update< K, V >( prod: &mut Producer, topic: &String, key: &K, update: &Update< V > ) -> Result< (), Error > where K: Serialize, V: Serialize {
 
-    let key_bytes = serde_json::to_vec( key ).map_err( | _ | Error::Serialize )?;
-    let update_bytes = serde_json::to_vec( update ).map_err( | _ | Error::Serialize )?;
+    let key_bytes = serialize( key, Infinite ).map_err( | _ | Error::Serialize )?;
+    let update_bytes = serialize( update, Infinite ).map_err( | _ | Error::Serialize )?;
 
     prod.send( &Record::from_key_value( topic, key_bytes.as_slice(), update_bytes.as_slice() ) ).map_err( | _ | Error::Produce )
 }
 
 fn recv_update< K, V >( message: &Message ) -> ( K, Update< V >, i64 ) where K: DeserializeOwned, V: DeserializeOwned {
 
-    let key: K = serde_json::from_slice( message.key ).unwrap();
-    let update: Update< V > = serde_json::from_slice( message.value ).unwrap();
+    let key: K = deserialize( message.key ).unwrap();
+    let update: Update< V > = deserialize( message.value ).unwrap();
 
     ( key, update, message.offset )
 }
@@ -333,11 +335,7 @@ mod tests {
     use super::*;
 
     fn connect_to_test() -> Connection< String, String > {
-        let conn = Connection::new( "localhost:9092".to_owned(), "kkvs_test".to_owned() );
-
-        assert!( conn.is_ok() );
-
-        conn.unwrap()
+        Connection::new( "localhost:9092".to_owned(), "kkvs_test".to_owned() ).unwrap()
     }
 
     #[ test ]
