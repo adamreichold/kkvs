@@ -1,3 +1,5 @@
+#![ feature( conservative_impl_trait ) ]
+
 extern crate futures;
 extern crate kafka;
 extern crate serde;
@@ -16,7 +18,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::atomic::{ AtomicBool, Ordering };
 
-use futures::Future;
+use futures::future::*;
 use futures::sync::oneshot;
 
 use kafka::consumer::{ Consumer, Message };
@@ -206,8 +208,8 @@ fn start_polling< K: 'static, V: 'static >( mut cons: Consumer, sender: &mpsc::S
         move || {
             while keep_polling.load( Ordering::Relaxed ) {
 
-                for messages in cons.poll().unwrap().iter() {
-                    for message in messages.messages() {
+                for message_set in cons.poll().unwrap().iter() {
+                    for message in message_set.messages() {
 
                         let ( key, update, new_offset ) = recv_update( message );
 
@@ -271,31 +273,49 @@ impl< K: 'static, V: 'static > Connection< K, V > where K: Debug + Send + Eq + H
         )
     }
 
-    pub fn get( &mut self, key: K ) -> Result< Option< V >, Error >{
+    pub fn get( &mut self, key: K ) -> impl Future< Item=Option< V >, Error=Error > {
 
         let ( sender, receiver ) = oneshot::channel();
 
-        self.sender.send( Command::Get( key, sender ) ).map_err( | _ | Error::Internal )?;
-
-        receiver.wait().map_err( | _ | Error::Internal )
+        self.send_cmd( Command::Get( key, sender ), receiver )
     }
 
-    pub fn set( &mut self, key: K, value: V ) -> Result< (), Error > {
+    pub fn get_sync( &mut self, key: K ) -> Result< Option< V >, Error > {
 
-        let ( sender, receiver ) = oneshot::channel();
-
-        self.sender.send( Command::Set( key, Some( value ), sender ) ).map_err( | _ | Error::Internal )?;
-
-        receiver.wait().map_err( | _ | Error::Internal ).and_then( | result | result )
+        self.get( key ).wait()
     }
 
-    pub fn del( &mut self, key: K ) -> Result< (), Error > {
+    pub fn set( &mut self, key: K, value: V ) -> impl Future< Item=(), Error=Error > {
 
         let ( sender, receiver ) = oneshot::channel();
 
-        self.sender.send( Command::Set( key, None, sender ) ).map_err( | _ | Error::Internal )?;
+        self.send_cmd( Command::Set( key, Some( value ), sender ), receiver ).and_then( result )
+    }
 
-        receiver.wait().map_err( | _ | Error::Internal ).and_then( | result | result )
+    pub fn set_sync( &mut self, key: K, value: V) -> Result< (), Error > {
+
+        self.set( key, value ).wait()
+    }
+
+    pub fn del( &mut self, key: K ) -> impl Future< Item=(), Error=Error > {
+
+        let ( sender, receiver ) = oneshot::channel();
+
+        self.send_cmd( Command::Set( key, None, sender ), receiver ).and_then( result )
+    }
+
+    pub fn del_sync( &mut self, key: K ) -> Result< (), Error > {
+
+        self.del( key ).wait()
+    }
+
+    fn send_cmd< T >( &mut self, cmd: Command< K, V >, receiver: oneshot::Receiver< T > ) -> impl Future< Item=T, Error=Error > {
+
+        let send_result = self.sender.send( cmd ).map_err( | _ | Error::Internal );
+
+        result( send_result ).and_then(
+            move | _ | receiver.map_err( | _ | Error::Internal )
+        )
     }
 }
 
@@ -313,7 +333,7 @@ mod tests {
     use super::*;
 
     fn connect_to_test() -> Connection< String, String > {
-        let conn = Connection::new( "localhost:9092".to_owned(), "test".to_owned() );
+        let conn = Connection::new( "localhost:9092".to_owned(), "kkvs_test".to_owned() );
 
         assert!( conn.is_ok() );
 
@@ -332,11 +352,11 @@ mod tests {
         let key = "foo".to_owned();
         let value = "bar".to_owned();
 
-        assert_eq!( conn.set( key.clone(), value.clone() ), Ok( () ) );
+        assert_eq!( conn.set_sync( key.clone(), value.clone() ), Ok( () ) );
 
-        assert_eq!( conn.get( key.clone() ), Ok( Some( value.clone() ) ) );
+        assert_eq!( conn.get_sync( key.clone() ), Ok( Some( value.clone() ) ) );
 
-        assert_eq!( conn.del( key.clone() ), Ok( () ) );
+        assert_eq!( conn.del_sync( key.clone() ), Ok( () ) );
     }
 
     #[ test ]
@@ -344,16 +364,16 @@ mod tests {
         let mut conn = connect_to_test();
 
         let key = "foobar".to_owned();
-        let value1 = "foo".to_owned();
-        let value2 = "bar".to_owned();
+        let first_value = "foo".to_owned();
+        let second_value = "bar".to_owned();
 
-        assert_eq!( conn.set( key.clone(), value1.clone() ), Ok( () ) );
+        assert_eq!( conn.set_sync( key.clone(), first_value.clone() ), Ok( () ) );
 
-        assert_eq!( conn.get( key.clone() ), Ok( Some( value1.clone() ) ) );
+        assert_eq!( conn.get_sync( key.clone() ), Ok( Some( first_value.clone() ) ) );
 
-        assert_eq!( conn.set( key.clone(), value2.clone() ), Ok( () ) );
+        assert_eq!( conn.set_sync( key.clone(), second_value.clone() ), Ok( () ) );
 
-        assert_eq!( conn.get( key.clone() ), Ok( Some( value2.clone() ) ) );
+        assert_eq!( conn.get_sync( key.clone() ), Ok( Some( second_value.clone() ) ) );
     }
 
     #[ test ]
@@ -363,13 +383,13 @@ mod tests {
         let key = "bar".to_owned();
         let value = "foo".to_owned();
 
-        assert_eq!( conn.set( key.clone(), value.clone() ), Ok( () ) );
+        assert_eq!( conn.set_sync( key.clone(), value.clone() ), Ok( () ) );
 
-        assert_eq!( conn.get( key.clone() ), Ok( Some( value.clone() ) ) );
+        assert_eq!( conn.get_sync( key.clone() ), Ok( Some( value.clone() ) ) );
 
-        assert_eq!( conn.del( key.clone() ), Ok( () ) );
+        assert_eq!( conn.del_sync( key.clone() ), Ok( () ) );
 
-        assert_eq!( conn.get( key.clone() ), Ok( None ) );
+        assert_eq!( conn.get_sync( key.clone() ), Ok( None ) );
     }
 
     #[ test ]
@@ -378,8 +398,8 @@ mod tests {
 
         let key = "barfoo".to_owned();
 
-        assert_eq!( conn.get( key.clone() ), Ok( None ) );
+        assert_eq!( conn.get_sync( key.clone() ), Ok( None ) );
 
-        assert_eq!( conn.del( key.clone() ), Err( Error::KeyNotFound ) );
+        assert_eq!( conn.del_sync( key.clone() ), Err( Error::KeyNotFound ) );
     }
 }
