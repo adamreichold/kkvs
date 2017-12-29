@@ -27,6 +27,7 @@ use serde::de::DeserializeOwned;
 
 use bincode::{ serialize, deserialize, Infinite };
 
+
 #[ derive( Debug, Clone, Copy, PartialEq ) ]
 pub enum Error {
     Internal,
@@ -37,23 +38,6 @@ pub enum Error {
     ConflictingWrite
 }
 
-enum Command< K, V > {
-    Get( K, oneshot::Sender< Option< V > > ),
-    Set( K, Option< V >, oneshot::Sender< Result< (), Error > > ),
-    Receive( K, Option< V >, i64, i64 ),
-    Disconnect
-}
-
-#[ derive( Serialize, Deserialize ) ]
-struct Update< V > {
-    new_value: Option< V >,
-    old_offset: i64
-}
-
-pub struct Connection< K, V > {
-    worker: Option< thread::JoinHandle< () > >,
-    sender: mpsc::Sender< Command< K, V > >
-}
 
 type Completion = oneshot::Sender< Result< (), Error > >;
 
@@ -73,7 +57,7 @@ impl CompletionHolder {
 
             CompletionHolder::One( sender ) => CompletionHolder::Many( vec![ sender, new_sender ] ),
 
-            CompletionHolder::Many( mut sender ) => { sender.push( new_sender); CompletionHolder::Many( sender ) }
+            CompletionHolder::Many( mut sender ) => { sender.push( new_sender ); CompletionHolder::Many( sender ) }
 
         };
 
@@ -99,9 +83,12 @@ impl CompletionHolder {
     }
 }
 
-type Values< K, V > = HashMap< K, ( V, i64 ) >;
 
-type PendingWrites< K, V > = HashMap< ( K, i64 ), ( Option< V >, CompletionHolder ) >;
+#[ derive( Serialize, Deserialize ) ]
+struct Update< V > {
+    new_value: Option< V >,
+    old_offset: i64
+}
 
 fn send_update< K, V >( prod: &mut Producer, topic: &String, key: &K, update: &Update< V > ) -> Result< (), Error > where K: Serialize, V: Serialize {
 
@@ -119,6 +106,9 @@ fn recv_update< K, V >( message: &Message ) -> ( K, Update< V >, i64 ) where K: 
     ( key, update, message.offset )
 }
 
+
+type PendingWrites< K, V > = HashMap< ( K, i64 ), ( Option< V >, CompletionHolder ) >;
+
 fn remove_pending_write< K, V >( pending_writes: &mut PendingWrites< K, V >, key: K, new_value: &Option< V >, old_offset: i64 ) -> ( K, Option< ( bool, CompletionHolder ) > ) where K: Eq + Hash, V: PartialEq {
 
     match pending_writes.entry( ( key, old_offset ) ) {
@@ -133,6 +123,9 @@ fn remove_pending_write< K, V >( pending_writes: &mut PendingWrites< K, V >, key
         }
     }
 }
+
+
+type Values< K, V > = HashMap< K, ( V, i64 ) >;
 
 fn update_value< K, V >( values: &mut Values< K, V >, key: K, new_value: Option< V >, old_offset: i64, new_offset: i64 ) -> bool where K: Eq + Hash {
 
@@ -185,6 +178,7 @@ fn update_value< K, V >( values: &mut Values< K, V >, key: K, new_value: Option<
 
     }
 }
+
 
 fn get< K, V >( values: &Values< K, V >, key: K, sender: oneshot::Sender< Option< V > > ) where K: Eq + Hash, V: Clone {
 
@@ -251,6 +245,14 @@ fn receive< K, V >( values: &mut Values< K, V >, pending_writes: &mut PendingWri
     }
 }
 
+
+enum Command< K, V > {
+    Get( K, oneshot::Sender< Option< V > > ),
+    Set( K, Option< V >, Completion ),
+    Receive( K, Option< V >, i64, i64 ),
+    Disconnect
+}
+
 fn start_polling< K: 'static, V: 'static >( mut cons: Consumer, sender: &mpsc::Sender< Command< K, V > >, keep_polling: &Arc< AtomicBool > ) -> thread::JoinHandle< () > where K: Send + DeserializeOwned, V: Send + DeserializeOwned {
 
     let sender = sender.clone();
@@ -274,7 +276,7 @@ fn start_polling< K: 'static, V: 'static >( mut cons: Consumer, sender: &mpsc::S
     )
 }
 
-fn start< K: 'static, V: 'static >( mut prod: Producer, topic: String, receiver: mpsc::Receiver< Command< K, V > >, keep_polling: Arc< AtomicBool >, poll_worker: thread::JoinHandle< () > ) -> thread::JoinHandle< () > where K: Send + Eq + Hash + Serialize, V: Send + Clone + PartialEq + Serialize {
+fn start< K: 'static, V: 'static >( mut prod: Producer, topic: String, receiver: mpsc::Receiver< Command< K, V > >, keep_polling: Arc< AtomicBool >, poll_handle: thread::JoinHandle< () > ) -> thread::JoinHandle< () > where K: Send + Eq + Hash + Serialize, V: Send + Clone + PartialEq + Serialize {
 
     thread::spawn(
         move || {
@@ -298,14 +300,19 @@ fn start< K: 'static, V: 'static >( mut prod: Producer, topic: String, receiver:
             }
 
             keep_polling.store( false, Ordering::Release );
-            let _ = poll_worker.join();
+            let _ = poll_handle.join();
         }
     )
 }
 
-impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Eq + Hash + Serialize + DeserializeOwned, V: Clone + Send + PartialEq + Serialize + DeserializeOwned {
+struct Worker< K, V > {
+    handle: Option< thread::JoinHandle< () > >,
+    sender: mpsc::Sender< Command< K, V > >
+}
 
-    pub fn new( host: String, topic: String ) -> Result< Self, Error > {
+impl< K: 'static, V: 'static > Worker< K, V > where K: Send + Eq + Hash + Serialize + DeserializeOwned, V: Clone + Send + PartialEq + Serialize + DeserializeOwned {
+
+    fn new( host: String, topic: String ) -> Result< Self, Error > {
 
         let cons = Consumer::from_hosts( vec!( host.clone() ) ).with_topic( topic.clone() ).create().map_err( | _ | Error::Connect )?;
         let prod = Producer::from_hosts( vec!( host ) ).create().map_err( | _ | Error::Connect )?;
@@ -314,13 +321,46 @@ impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Eq + Hash + Se
 
         let keep_polling = Arc::new( AtomicBool::new( true ) );
 
-        let poll_worker = start_polling( cons, &sender, &keep_polling );
+        let poll_handle = start_polling( cons, &sender, &keep_polling );
 
-        let worker = start( prod, topic, receiver, keep_polling, poll_worker );
+        let handle = start( prod, topic, receiver, keep_polling, poll_handle );
 
         Ok(
             Self {
-                worker: Some( worker ),
+                handle: Some( handle ),
+                sender: sender
+            }
+        )
+    }
+}
+
+impl< K, V > Drop for Worker< K, V > {
+
+    fn drop(&mut self) {
+
+        self.sender.send( Command::Disconnect ).unwrap();
+        let _ = self.handle.take().unwrap().join();
+    }
+}
+
+
+#[ derive( Clone ) ]
+pub struct Connection< K, V > {
+    worker: Arc< Worker< K, V > >,
+    sender: mpsc::Sender< Command< K, V > >
+}
+
+impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Eq + Hash + Serialize + DeserializeOwned, V: Clone + Send + PartialEq + Serialize + DeserializeOwned {
+
+    pub fn new( host: String, topic: String ) -> Result< Self, Error > {
+
+        let worker = Worker::new( host, topic )?;
+
+        let sender = worker.sender.clone();
+
+        Ok(
+            Self {
+                worker: Arc::new( worker ),
                 sender: sender
             }
         )
@@ -364,7 +404,7 @@ impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Eq + Hash + Se
 
     fn send_cmd< T >( &self, cmd: Command< K, V >, receiver: oneshot::Receiver< T > ) -> impl Future< Item=T, Error=Error > {
 
-        let send_result = self.sender.send( cmd ).map_err( | _ | { println!("send err");  Error::Internal } );
+        let send_result = self.sender.send( cmd ).map_err( | _ | { Error::Internal } );
 
         result( send_result ).and_then(
             move | _ | receiver.map_err( | _ | Error::Internal )
@@ -372,14 +412,6 @@ impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Eq + Hash + Se
     }
 }
 
-impl< K, V > Drop for Connection< K, V > {
-
-    fn drop(&mut self) {
-
-        self.sender.send( Command::Disconnect ).unwrap();
-        let _ = self.worker.take().unwrap().join();
-    }
-}
 
 #[ cfg( test ) ]
 mod tests {
@@ -389,6 +421,7 @@ mod tests {
     use super::*;
 
     fn connect_to_test() -> Connection< String, String > {
+
         Connection::new( "localhost:9092".to_owned(), "kkvs_test".to_owned() ).unwrap()
     }
 
@@ -403,11 +436,13 @@ mod tests {
 
     #[ test ]
     fn can_connect() {
+
         connect_to_test();
     }
 
     #[ test ]
     fn can_set_get_del() {
+
         let conn = connect_to_test();
 
         let key = "foo".to_owned();
@@ -422,6 +457,7 @@ mod tests {
 
     #[ test ]
     fn can_set() {
+
         let conn = connect_to_test();
 
         let key = "foobar".to_owned();
@@ -439,6 +475,7 @@ mod tests {
 
     #[ test ]
     fn can_del() {
+
         let conn = connect_to_test();
 
         let key = "bar".to_owned();
@@ -455,6 +492,7 @@ mod tests {
 
     #[ test ]
     fn cannot_del() {
+
         let conn = connect_to_test();
 
         let key = "barfoo".to_owned();
