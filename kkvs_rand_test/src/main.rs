@@ -102,7 +102,7 @@ fn rand_regs() -> Vec< Register > {
 
 fn main() {
 
-    let conn = Connection::new( "localhost:9092".to_owned(), "kkvs_rand_test".to_owned() ).unwrap();
+    let conn = Connection::new( "localhost:9092".to_owned(), "kkvs_rand_test".to_owned(), None ).unwrap();
 
     let regs = rand_regs();
 

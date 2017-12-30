@@ -36,7 +36,8 @@ pub enum Error {
     Produce,
     Serialize,
     KeyNotFound,
-    ConflictingWrite
+    ConflictingWrite,
+    IncompatibleSnapshot
 }
 
 
@@ -241,11 +242,17 @@ fn receive< K, V >( values: &mut Values< K, V >, pending_writes: &mut PendingWri
     }
 }
 
+fn snapshot< K, V >( values: &Values< K, V >, sender: oneshot::Sender< Result< Vec< u8 >, Error > > ) where K: Eq + Hash + Serialize, V: Serialize {
+
+    let _ = sender.send( serialize( values, Infinite ).map_err( | _ | Error::Serialize ) );
+}
+
 
 enum Command< K, V > {
     Get( K, oneshot::Sender< Option< V > > ),
     Set( K, Option< V >, bool, Completion ),
     Receive( K, Option< V >, i64, i64 ),
+    Snapshot( oneshot::Sender< Result< Vec< u8 >, Error > > ),
     Disconnect
 }
 
@@ -272,12 +279,10 @@ fn start_polling< K: 'static, V: 'static >( mut cons: Consumer, sender: &mpsc::S
     )
 }
 
-fn start< K: 'static, V: 'static >( mut prod: Producer, topic: String, receiver: mpsc::Receiver< Command< K, V > >, keep_polling: Arc< AtomicBool >, poll_handle: thread::JoinHandle< () > ) -> thread::JoinHandle< () > where K: Send + Clone + Eq + Hash + Serialize, V: Send + Clone + PartialEq + Serialize {
+fn start< K: 'static, V: 'static >( mut prod: Producer, topic: String, receiver: mpsc::Receiver< Command< K, V > >, keep_polling: Arc< AtomicBool >, poll_handle: thread::JoinHandle< () >, mut values: Values< K, V > ) -> thread::JoinHandle< () > where K: Send + Clone + Eq + Hash + Serialize, V: Send + Clone + PartialEq + Serialize {
 
     thread::spawn(
         move || {
-
-            let mut values = Values::new();
 
             let mut pending_writes = PendingWrites::new();
 
@@ -289,6 +294,8 @@ fn start< K: 'static, V: 'static >( mut prod: Producer, topic: String, receiver:
                     Command::Set( key, value, lww, sender ) => set( &mut prod, &topic, &values, &mut pending_writes, key, value, lww, sender ),
 
                     Command::Receive( key, new_value, old_offset, new_offset ) => receive( &mut values, &mut pending_writes, key, new_value, old_offset, new_offset ),
+
+                    Command::Snapshot( sender ) => snapshot( &values, sender ),
 
                     Command::Disconnect => break
 
@@ -308,7 +315,13 @@ struct Worker< K, V > {
 
 impl< K: 'static, V: 'static > Worker< K, V > where K: Send + Clone + Eq + Hash + Serialize + DeserializeOwned, V: Send + Clone + PartialEq + Serialize + DeserializeOwned {
 
-    fn new( host: String, topic: String ) -> Result< Self, Error > {
+    fn new( host: String, topic: String, snapshot: Option< &[ u8 ] > ) -> Result< Self, Error > {
+
+        let values = if let Some( snapshot ) = snapshot {
+            deserialize( snapshot ).map_err( | _ | Error::IncompatibleSnapshot )?
+        } else {
+            Values::new()
+        };
 
         let cons = Consumer::from_hosts( vec!( host.clone() ) ).with_topic( topic.clone() ).with_fallback_offset( FetchOffset::Earliest ).create().map_err( | _ | Error::Connect )?;
         let prod = Producer::from_hosts( vec!( host ) ).create().map_err( | _ | Error::Connect )?;
@@ -319,7 +332,7 @@ impl< K: 'static, V: 'static > Worker< K, V > where K: Send + Clone + Eq + Hash 
 
         let poll_handle = start_polling( cons, &sender, &keep_polling );
 
-        let handle = start( prod, topic, receiver, keep_polling, poll_handle );
+        let handle = start( prod, topic, receiver, keep_polling, poll_handle, values );
 
         Ok(
             Self {
@@ -348,9 +361,9 @@ pub struct Connection< K, V > {
 
 impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Clone + Eq + Hash + Serialize + DeserializeOwned, V: Send + Clone + PartialEq + Serialize + DeserializeOwned {
 
-    pub fn new( host: String, topic: String ) -> Result< Self, Error > {
+    pub fn new( host: String, topic: String, snapshot: Option< &[ u8 ] > ) -> Result< Self, Error > {
 
-        let worker = Worker::new( host, topic )?;
+        let worker = Worker::new( host, topic, snapshot )?;
 
         let sender = worker.sender.clone();
 
@@ -387,6 +400,13 @@ impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Clone + Eq + H
     pub fn del_lww( &self, key: K ) -> impl Future< Item=(), Error=Error > {
 
         self.send_set( key, None, true )
+    }
+
+    pub fn snapshot( &self ) -> impl Future< Item=Vec< u8 >, Error=Error > {
+
+        let ( sender, receiver ) = oneshot::channel();
+
+        self.send_cmd( Command::Snapshot( sender ), receiver ).and_then( result )
     }
 
     fn send_set( &self, key: K, value: Option< V >, lww: bool ) -> impl Future< Item=(), Error=Error > {
@@ -459,7 +479,7 @@ mod tests {
 
     fn connect() -> Connection< String, String > {
 
-        Connection::new( "localhost:9092".to_owned(), "kkvs_test".to_owned() ).unwrap()
+        Connection::new( "localhost:9092".to_owned(), "kkvs_test".to_owned(), None ).unwrap()
     }
 
     fn connect_and_sync() -> Connection< String, String > {
