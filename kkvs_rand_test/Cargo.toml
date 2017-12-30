@@ -1,0 +1,9 @@
+[package]
+name = "kkvs_rand_test"
+version = "0.1.0"
+authors = ["Adam Reichold <adam.reichold@t-online.de>"]
+
+[dependencies]
+rand = "0.4.1"
+futures = "0.1.17"
+kkvs = { path = ".." }

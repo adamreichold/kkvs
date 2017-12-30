@@ -51,7 +51,7 @@ impl CompletionHolder {
 
     fn push( &mut self, new_sender: Completion ) {
 
-        let new_self = match std::mem::replace( self, CompletionHolder::Zero ) {
+        *self = match std::mem::replace( self, CompletionHolder::Zero ) {
 
             CompletionHolder::Zero => CompletionHolder::One( new_sender ),
 
@@ -60,8 +60,6 @@ impl CompletionHolder {
             CompletionHolder::Many( mut sender ) => { sender.push( new_sender ); CompletionHolder::Many( sender ) }
 
         };
-
-        *self = new_self;
     }
 
     fn call( self, result: Result< (), Error > ) {
