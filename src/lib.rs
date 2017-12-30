@@ -105,19 +105,19 @@ fn recv_update< K, V >( message: &Message ) -> ( K, Update< V >, i64 ) where K: 
 }
 
 
-type PendingWrites< K, V > = HashMap< ( K, i64 ), ( Option< V >, CompletionHolder ) >;
+type PendingWrites< K, V > = HashMap< K, ( Option< V >, CompletionHolder ) >;
 
-fn remove_pending_write< K, V >( pending_writes: &mut PendingWrites< K, V >, key: K, new_value: &Option< V >, old_offset: i64 ) -> ( K, Option< ( bool, CompletionHolder ) > ) where K: Eq + Hash, V: PartialEq {
+fn remove_pending_write< K, V >( pending_writes: &mut PendingWrites< K, V >, key: K, new_value: &Option< V > ) -> ( K, Option< ( bool, CompletionHolder ) > ) where K: Eq + Hash, V: PartialEq {
 
-    match pending_writes.entry( ( key, old_offset ) ) {
+    match pending_writes.entry( key ) {
 
-        Entry::Vacant( entry ) => ( entry.into_key().0, None ),
+        Entry::Vacant( entry ) => ( entry.into_key(), None ),
 
         Entry::Occupied( entry ) => {
 
-            let ( ( key, _ ), ( expected_value, holder ) ) = entry.remove_entry();
+            let ( key, ( pending_value, holder ) ) = entry.remove_entry();
 
-            ( key, Some( ( expected_value != *new_value, holder ) ) )
+            ( key, Some( ( pending_value != *new_value, holder ) ) )
         }
     }
 }
@@ -194,16 +194,11 @@ fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pe
         return;
     }
 
-    let update: Update< V > = Update{
-        new_value: value,
-        old_offset: offset.unwrap_or( -1 )
-    };
-
-    match pending_writes.entry( ( key, update.old_offset ) ) {
+    match pending_writes.entry( key ) {
 
         Entry::Occupied( mut entry ) => {
 
-            if update.new_value != entry.get().0 {
+            if entry.get().0 != value {
                 let _ = sender.send( Err( Error::ConflictingWrite ) );
                 return;
             }
@@ -212,6 +207,11 @@ fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pe
         }
 
         Entry::Vacant( entry ) => {
+
+            let update: Update< V > = Update{
+                new_value: value,
+                old_offset: offset.unwrap_or( -1 )
+            };
 
             if let Err( err ) = send_update( prod, topic, entry.key(), &update ) {
                 let _ = sender.send( Err( err ) );
@@ -226,7 +226,7 @@ fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pe
 
 fn receive< K, V >( values: &mut Values< K, V >, pending_writes: &mut PendingWrites< K, V >, key: K, new_value: Option< V >, old_offset: i64, new_offset: i64 ) where K: Eq + Hash, V: PartialEq {
 
-    let ( key, pending_write ) = remove_pending_write( pending_writes, key, &new_value, old_offset );
+    let ( key, pending_write ) = remove_pending_write( pending_writes, key, &new_value );
 
     if update_value( values, key, new_value, old_offset, new_offset ) {
 
