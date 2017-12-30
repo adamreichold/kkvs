@@ -110,24 +110,6 @@ fn recv_update< K, V >( message: &Message ) -> ( K, Update< V >, i64 ) where K: 
 }
 
 
-type PendingWrites< K, V > = HashMap< K, ( Option< V >, CompletionHolder ) >;
-
-fn remove_pending_write< K, V >( pending_writes: &mut PendingWrites< K, V >, key: K, new_value: &Option< V > ) -> ( K, Option< ( bool, CompletionHolder ) > ) where K: Eq + Hash, V: PartialEq {
-
-    match pending_writes.entry( key ) {
-
-        Entry::Vacant( entry ) => ( entry.into_key(), None ),
-
-        Entry::Occupied( entry ) => {
-
-            let ( key, ( pending_value, holder ) ) = entry.remove_entry();
-
-            ( key, Some( ( pending_value != *new_value, holder ) ) )
-        }
-    }
-}
-
-
 type Values< K, V > = HashMap< K, ( V, i64 ) >;
 
 fn update_value< K, V >( values: &mut Values< K, V >, key: K, new_value: Option< V >, old_offset: i64, new_offset: i64 ) -> bool where K: Eq + Hash {
@@ -136,7 +118,7 @@ fn update_value< K, V >( values: &mut Values< K, V >, key: K, new_value: Option<
 
         Entry::Vacant( entry ) => {
 
-            if new_value.is_some() {
+            if old_offset == OFFSET_LWW || ( old_offset == OFFSET_NEW && new_value.is_some() ) {
                 entry.insert( ( new_value.unwrap(), new_offset ) );
                 return true;
             }
@@ -182,6 +164,8 @@ fn get< K, V >( values: &Values< K, V >, key: K, sender: oneshot::Sender< Option
 
     let _ = sender.send( value );
 }
+
+type PendingWrites< K, V > = HashMap< K, ( Option< V >, CompletionHolder ) >;
 
 fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pending_writes: &mut PendingWrites< K, V >, key: K, value: Option< V >, lww: bool, sender: Completion ) where K: Eq + Hash + Serialize, V: PartialEq + Serialize {
 
@@ -233,20 +217,25 @@ fn set< K, V >( prod: &mut Producer, topic: &String, values: &Values< K, V >, pe
     };
 }
 
-fn receive< K, V >( values: &mut Values< K, V >, pending_writes: &mut PendingWrites< K, V >, key: K, new_value: Option< V >, old_offset: i64, new_offset: i64 ) where K: Eq + Hash, V: PartialEq {
+fn receive< K, V >( values: &mut Values< K, V >, pending_writes: &mut PendingWrites< K, V >, key: K, new_value: Option< V >, old_offset: i64, new_offset: i64 ) where K: Clone + Eq + Hash, V: PartialEq {
 
-    let ( key, pending_write ) = remove_pending_write( pending_writes, key, &new_value );
+    match pending_writes.entry( key ) {
 
-    if update_value( values, key, new_value, old_offset, new_offset ) {
+        Entry::Vacant( entry ) => {
+            update_value( values, entry.into_key(), new_value, old_offset, new_offset );
+        }
 
-        if let Some( ( conflict, holder ) ) = pending_write {
-            let _ = holder.call(
-                if conflict {
-                    Err( Error::ConflictingWrite )
-                } else {
-                    Ok( () )
-                }
-            );
+        Entry::Occupied( entry ) => {
+
+            let result = if entry.get().0 == new_value {
+                Ok( () )
+            } else {
+                Err( Error::ConflictingWrite )
+            };
+
+            if update_value( values, entry.key().clone(), new_value, old_offset, new_offset ) {
+                entry.remove().1.call( result );
+            }
         }
 
     }
@@ -283,7 +272,7 @@ fn start_polling< K: 'static, V: 'static >( mut cons: Consumer, sender: &mpsc::S
     )
 }
 
-fn start< K: 'static, V: 'static >( mut prod: Producer, topic: String, receiver: mpsc::Receiver< Command< K, V > >, keep_polling: Arc< AtomicBool >, poll_handle: thread::JoinHandle< () > ) -> thread::JoinHandle< () > where K: Send + Eq + Hash + Serialize, V: Send + Clone + PartialEq + Serialize {
+fn start< K: 'static, V: 'static >( mut prod: Producer, topic: String, receiver: mpsc::Receiver< Command< K, V > >, keep_polling: Arc< AtomicBool >, poll_handle: thread::JoinHandle< () > ) -> thread::JoinHandle< () > where K: Send + Clone + Eq + Hash + Serialize, V: Send + Clone + PartialEq + Serialize {
 
     thread::spawn(
         move || {
@@ -317,7 +306,7 @@ struct Worker< K, V > {
     sender: mpsc::Sender< Command< K, V > >
 }
 
-impl< K: 'static, V: 'static > Worker< K, V > where K: Send + Eq + Hash + Serialize + DeserializeOwned, V: Clone + Send + PartialEq + Serialize + DeserializeOwned {
+impl< K: 'static, V: 'static > Worker< K, V > where K: Send + Clone + Eq + Hash + Serialize + DeserializeOwned, V: Send + Clone + PartialEq + Serialize + DeserializeOwned {
 
     fn new( host: String, topic: String ) -> Result< Self, Error > {
 
@@ -357,7 +346,7 @@ pub struct Connection< K, V > {
     sender: mpsc::Sender< Command< K, V > >
 }
 
-impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Eq + Hash + Serialize + DeserializeOwned, V: Clone + Send + PartialEq + Serialize + DeserializeOwned {
+impl< K: 'static, V: 'static > Connection< K, V > where K: Send + Clone + Eq + Hash + Serialize + DeserializeOwned, V: Send + Clone + PartialEq + Serialize + DeserializeOwned {
 
     pub fn new( host: String, topic: String ) -> Result< Self, Error > {
 
