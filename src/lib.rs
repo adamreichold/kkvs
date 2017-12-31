@@ -56,6 +56,7 @@ pub enum Error {
     Connect,
     Produce,
     Serialize,
+    Deserialize,
     KeyNotFound,
     ConflictingWrite,
     IncompatibleSnapshot
@@ -123,12 +124,12 @@ fn send_update< K, V >( prod: &mut Producer, topic: &String, key: &K, update: &U
     prod.send( &Record::from_key_value( topic, key.as_slice(), update.as_slice() ) ).map_err( | _ | Error::Produce )
 }
 
-fn recv_update< K, V >( message: &Message ) -> ( K, Update< V >, i64 ) where K: DeserializeOwned, V: DeserializeOwned {
+fn recv_update< K, V >( message: &Message ) -> Result< ( K, Update< V >, i64 ), Error > where K: DeserializeOwned, V: DeserializeOwned {
 
-    let key: K = deserialize( message.key ).unwrap();
-    let update: Update< V > = deserialize( message.value ).unwrap();
+    let key: K = deserialize( message.key ).map_err( | _ | Error::Deserialize )?;
+    let update: Update< V > = deserialize( message.value ).map_err( | _ | Error::Deserialize )?;
 
-    ( key, update, message.offset )
+    Ok( ( key, update, message.offset ) )
 }
 
 
@@ -290,9 +291,9 @@ fn start_polling< K: 'static, V: 'static >( mut cons: Consumer, sender: &mpsc::S
                 for message_set in cons.poll().unwrap().iter() {
                     for message in message_set.messages() {
 
-                        let ( key, update, new_offset ) = recv_update( message );
-
-                        sender.send( Command::Receive( key, update.new_value, update.old_offset, new_offset ) ).unwrap();
+                        if let Ok( ( key, update, new_offset ) ) = recv_update( message ) {
+                            sender.send( Command::Receive( key, update.new_value, update.old_offset, new_offset ) ).unwrap();
+                        }
                     }
                 }
             }
