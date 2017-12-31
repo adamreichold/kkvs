@@ -25,6 +25,9 @@ extern crate rand;
 extern crate futures;
 extern crate kkvs;
 
+use std::fs::File;
+use std::io::prelude::*;
+
 use rand::{ Rng, thread_rng };
 use rand::distributions::{ Sample, Range };
 
@@ -73,12 +76,12 @@ impl Register {
         self.then_self( conn.del( key ) )
     }
 
-    fn repeat( self ) -> impl Future< Item=Loop< (), Self >, Error=() > {
+    fn repeat( self ) -> impl Future< Item=Loop< Self, Self >, Error=() > {
 
         if self.ops < 90 {
             ok( Loop::Continue( self ) )
         } else {
-            ok( Loop::Break( () ) )
+            ok( Loop::Break( self ) )
         }
     }
 }
@@ -121,9 +124,31 @@ fn rand_regs() -> Vec< Register > {
     regs
 }
 
+fn read_snapshot() -> Option< Vec< u8 > > {
+
+    File::open( "snapshot.kkvs" ).ok().map(
+        | mut file | {
+            let mut buffer = Vec::new();
+            file.read_to_end( &mut buffer ).unwrap();
+            buffer
+        }
+    )
+}
+
+fn write_snapshot( snapshot: &[ u8 ] ) {
+
+    File::create( "snapshot.kkvs" ).unwrap().write_all( &snapshot ).unwrap()
+}
+
 fn main() {
 
-    let conn = Connection::new( "localhost:9092".to_owned(), "kkvs_rand_test".to_owned(), None ).unwrap();
+    let snapshot = read_snapshot();
+
+    let conn = Connection::new(
+        "localhost:9092".to_owned(),
+        "kkvs_rand_test".to_owned(),
+        snapshot.as_ref().map( Vec::as_slice )
+    ).unwrap();
 
     let regs = rand_regs();
 
@@ -138,8 +163,10 @@ fn main() {
                             .and_then( | reg | reg.del( &conn ) )
                             .and_then( | reg | reg.repeat() )
                     }
-                )
+                ).and_then( | reg | reg.set( &conn ) )
             }
         )
     ).wait().unwrap();
+
+    write_snapshot( &conn.snapshot().wait().unwrap() );
 }
