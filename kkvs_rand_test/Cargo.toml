@@ -2,8 +2,9 @@
 name = "kkvs_rand_test"
 version = "0.1.0"
 authors = ["Adam Reichold <adam.reichold@t-online.de>"]
+edition = "2018"
 
 [dependencies]
-rand = "0.4.1"
-futures = "0.1.17"
+rand = "0.7"
+futures = "0.3"
 kkvs = { path = ".." }

@@ -1,14 +1,17 @@
+[workspace]
+members = ["kkvs_rand_test"]
+
 [package]
 name = "kkvs"
 version = "0.1.0"
 authors = ["Adam Reichold <adam.reichold@t-online.de>"]
+edition = "2018"
 
 [dependencies]
-futures = "0.1.17"
-kafka = "0.7.0"
-serde = "1.0.24"
-serde_derive = "1.0.24"
-bincode = "0.9.2"
+futures = "0.3"
+kafka = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.2"
 
 [dev-dependencies]
-rand = "0.4.1"
+rand = "0.7"
