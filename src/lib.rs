@@ -417,7 +417,7 @@ impl<K, V> Drop for Worker<K, V> {
 
 #[derive(Clone)]
 pub struct Connection<K, V> {
-    worker: Arc<Mutex<Worker<K, V>>>,
+    _worker: Arc<Mutex<Worker<K, V>>>,
     sender: mpsc::Sender<Command<K, V>>,
 }
 
@@ -438,7 +438,7 @@ where
         let sender = worker.sender.clone();
 
         Ok(Self {
-            worker: Arc::new(Mutex::new(worker)),
+            _worker: Arc::new(Mutex::new(worker)),
             sender,
         })
     }
@@ -502,7 +502,7 @@ mod tests {
     fn rand_sleep(millis: u64) {
         use rand::{thread_rng, Rng};
 
-        sleep(thread_rng().gen_range(0, millis));
+        sleep(thread_rng().gen_range(0..millis));
     }
 
     fn rand_str() -> String {
@@ -510,7 +510,7 @@ mod tests {
         use std::iter::repeat;
 
         repeat(())
-            .map(|()| thread_rng().sample(Alphanumeric))
+            .map(|()| thread_rng().sample(Alphanumeric) as char)
             .take(64)
             .collect()
     }

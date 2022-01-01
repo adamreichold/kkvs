@@ -78,7 +78,7 @@ fn read_snapshot() -> Option<Vec<u8>> {
 fn write_snapshot(snapshot: &[u8]) {
     File::create("snapshot.kkvs")
         .unwrap()
-        .write_all(&snapshot)
+        .write_all(snapshot)
         .unwrap()
 }
 
@@ -88,7 +88,7 @@ fn main() {
     let conn = Connection::new(
         "localhost:9092".to_owned(),
         "kkvs_rand_test".to_owned(),
-        snapshot.as_ref().map(Vec::as_slice),
+        snapshot.as_deref(),
     )
     .unwrap();
 
@@ -98,13 +98,11 @@ fn main() {
         let conn = &conn;
 
         regs.into_iter()
-            .map(|reg| {
-                async move {
-                    for _ops in 0..90 {
-                        conn.set(reg.key, reg.val.clone()).await.unwrap();
-                        conn.get(reg.key).await.unwrap();
-                        conn.del(reg.key).await.unwrap();
-                    }
+            .map(|reg| async move {
+                for _ops in 0..90 {
+                    conn.set(reg.key, reg.val.clone()).await.unwrap();
+                    conn.get(reg.key).await.unwrap();
+                    conn.del(reg.key).await.unwrap();
                 }
             })
             .collect::<FuturesUnordered<_>>()

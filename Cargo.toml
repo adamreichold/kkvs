@@ -5,7 +5,7 @@ members = ["kkvs_rand_test"]
 name = "kkvs"
 version = "0.1.0"
 authors = ["Adam Reichold <adam.reichold@t-online.de>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 futures = "0.3"
@@ -14,4 +14,4 @@ serde = { version = "1.0", features = ["derive"] }
 bincode = "1.2"
 
 [dev-dependencies]
-rand = "0.7"
+rand = "0.8"
